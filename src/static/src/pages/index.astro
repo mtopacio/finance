@@ -1,0 +1,345 @@
+---
+import Default from '../layouts/DefaultLayout.astro'
+import Card from '../components/CardComponent.astro';
+
+---
+
+
+<Default>
+
+    <div class="flex flex-col gap-x-4">
+
+        <div class="flex flex-row w-full">
+            <div class="w-1/5 h-1/2 p-8">
+                <div class="font-semibold text-white">Instruments</div>
+                <textarea id="symbols" class="w-full h-2/3 rounded-lg p-2 mt-2"></textarea>
+                <label for="anchor" class="text-white">Choose an anchor for TA:</label>
+                <select id="anchor" name="anchor" class="rounded-md px-1">
+                  <option value="open">Open</option>
+                  <option value="high">High</option>
+                  <option value="low">Low</option>
+                  <option value="close">Close</option>
+                </select> 
+                <div class="flex flex-row justify-center">
+                    <button id="saveButton" class="bg-yellow-100 mt-2 px-4 py-1 rounded-md hover:scale-105 active:scale-95">Save</button>
+                </div>
+            </div>
+            <div class="h-64 w-full m-4 p-4 bg-white text-black rounded-md shadow-lg flex flex-row" id="context">
+                <div id="context-plot" class="w-full w-1/3">PLOT</div>
+                <div class="bg-blue-100 w-full" id="context-info"></div>
+            </div>
+        </div>
+               
+        <div class="text-white w-full grid grid-cols-3 grid-flow-row overflow-auto" id="cards"></div>
+       
+        
+       
+
+    </div>
+
+</Default>
+<script>
+    
+    import { getInstrument, getHistoricals, getOptions, getPrice, getOption} from '../js/api.js';
+    import Alpine from 'alpinejs';
+    import * as echarts from 'echarts';
+    import { _ } from 'lodash';
+    Alpine.store('symbols', []);
+    Alpine.start();
+
+    console.log('[index.astro] Script starting...')
+
+    // load symbols from local storage
+    let oldSymbols = JSON.parse(localStorage.getItem("symbols"));
+    if (oldSymbols) {
+        document.getElementById("symbols").value = oldSymbols.join(",");
+        Alpine.store('symbols', oldSymbols);
+    }
+    const anchor = document.getElementById('anchor').value;
+
+    // save symbols to local storage
+    document.getElementById("saveButton").addEventListener("click", function(e) {
+        
+        let newSymbols = document.getElementById("symbols")
+            .value.split(",").map(s => s.trim());
+
+        localStorage.setItem("symbols", JSON.stringify(newSymbols));
+        Alpine.store('symbols', newSymbols);
+    });
+
+    async function getData(s) {
+        return {
+            instrument: await getInstrument(s),
+            price: await getPrice(s),
+            options: await getOptions(s),
+            historicals: await getHistoricals(s)
+        }
+    } 
+
+    function sma(arr, n) {
+        let output = [];
+        for (let i=0; i<arr.length; i++) {
+            if (i < n) {
+                output.push(null);
+            } else {
+                output.push(_.sum(arr.slice(i-n, i))/n)
+            }
+        }
+        return output;
+    }
+
+    function diff(arr) {
+        let output = [];
+        for (let i=0; i<arr.length; i++) {
+            if (i === 0) {
+                output.push(0);
+            } else {
+                output.push(arr[i] - arr[i-1]);
+            }
+        }
+        return output;
+    }
+
+    // create some data
+    function signals(y) {
+        let output = {};
+        const windows = [7, 14, 30, 120]
+        windows.forEach(w => {
+            output[w] = {
+                sma: sma(y, w),
+                diff: diff(sma(y, w))
+            }
+        })
+
+        return output;
+    }
+
+    // populate context: SPY and DIA
+    let contextChart = echarts.init(document.getElementById(`context-plot`));
+    contextChart.showLoading();
+    getData('SPY').then(spy => { 
+
+        console.log('SPY', spy.historicals)
+        
+        // rebase at 0
+        let x = [];
+        let y = [];
+        let prev_price = 0;
+        spy.historicals.forEach((d) => {
+
+            // base info
+            x.push(d.begins_at.split('T')[0]);
+            if (y.length === 0) {
+                y.push(0)
+            } else {
+                y.push(d[anchor + '_price'] - prev_price + y[y.length - 1]);
+            }
+            prev_price = d[anchor + '_price'];
+
+        })
+
+        let spySignals = signals(y);
+        console.log('spySignals', spySignals)
+        
+        let spySeries = Object.keys(spySignals).map(s => {
+            // let data = spySignals[s];
+            // let sma = data.sma;
+            return {
+                name: `SMA${s}`,
+                type: 'line',
+                data: spySignals[s].sma,
+                showSymbol: false,
+            }
+        });
+        
+        let options = {
+            tooltip: {
+                trigger: 'axis'
+            },
+            xAxis: {
+                data: x
+            },
+            yAxis: {},
+            dataZoom: [ 
+                {
+                    type: 'inside'
+                }
+            ],
+            series: [
+                {
+                    name: 'SPY',
+                    type: 'line',
+                    data: y,
+                    showSymbol: false,
+                },
+                ...spySeries
+            ],
+            grid: {
+                left: 35,
+                top: 10,
+                right: 10,
+                bottom: 20 
+            },
+        }
+        contextChart.setOption(options);
+        contextChart.hideLoading();
+
+        console.log('SPY Series', spySeries)
+        console.log(spySignals['7'])
+
+        document.getElementById('context-info').innerHTML = `
+            <div>
+                Small Trend: ${spySignals['7']['diff'].slice(-1)[0] > 0 ? '+' : '-'}<br>
+                Large Trend: ${spySignals['14']['diff'].slice(-1)[0] > 0 ? '+' : '-'}<br>
+            <div>
+        `;
+
+    });
+
+    Alpine.effect(() => {
+
+        let symbols = Alpine.store('symbols');
+        console.log(`[index.astro] Symbols: ${symbols.join(",")}`);
+       
+        if (symbols[0] === "") {
+            console.log('[index.astro] No symbols found.')
+            return;
+        }
+
+        // create a div for each symbol
+        document.getElementById("cards").innerHTML = symbols.map(s => {
+            return `<div class="h-64 m-4 p-4 bg-white text-black rounded-lg">
+                <div id="${s}-data"></div>
+            </div>`;
+        }).join("");
+
+
+        symbols.forEach((s) => {
+
+            getData(s).then(d => {
+             
+                console.log(`Data for ${s}`, d)
+
+                let last = d.historicals.slice(-1)[0]
+
+                let card = document.getElementById(`${s}-data`);
+                card.innerHTML = `
+                        <div class="font-semibold pb-2">${d.instrument[0].name} (${s})</div>
+                        <div class="flex flex-row gap-x-6">
+                            <div id="${s}-hplot" class="w-80 h-48"></div>
+                            <div class="flex flex-col w-72">
+                                <div class="flex flex-row justify-between">
+                                    <div>Ask/Bid</div>
+                                    <div>${parseFloat(d.price.ask)}/${parseFloat(d.price.bid)}</div>
+                                </div>
+                                <div class="flex flex-row justify-between">
+                                    <div>Previous Close:</div>
+                                    <div>${parseFloat(d.close_price)}</div>
+                                </div>
+                            </div>
+                        </div>
+                    `
+                    let chart = echarts.init(document.getElementById(`${s}-hplot`));
+                    chart.showLoading()
+               
+                // find options near strike price
+                let lastClose = parseFloat(last.close_price)
+                let i=0;
+                let curr = d.options.calls[i].strike_price;
+                while (lastClose > curr) {
+                    
+                    i++;
+                    curr = d.options.calls[i].strike_price;
+                    
+                }
+                let bottom_calls = [];
+                let top_calls = [];
+                [...Array(10).keys()].map(b => {
+                    top_calls.push(d.options.calls[i+b+1]);
+                    bottom_calls.push(d.options.calls[i-b]);
+
+                    // do math here?
+                });
+
+
+
+                [...Array(10).keys()].map(k => {
+                    let tc = top_calls[k].id;
+                    let bc = bottom_calls[k].id;
+                    
+                    
+                    
+                    // console.log(high_call)
+
+                })
+                  
+                
+
+                // TAs
+                let y = d.historicals.map((data) => { return parseFloat(data[anchor + '_price']) });
+                console.log(y);
+                let sigs = signals(y);  
+                let smas = Object.keys(sigs).map(s => {
+                    return {
+                        name: `SMA${s}`,
+                        type: 'line',
+                        data: sigs[s].sma,
+                        showSymbol: false,
+                    }
+                })
+              
+                
+                let options = {
+                    tooltip: {
+                        trigger: 'axis'
+                    },
+                    xAxis: {
+                        data: d.historicals.map((data) => { return data.begins_at.split('T')[0] })
+                    },
+                    yAxis: {},
+                    dataZoom: [ 
+                        {
+                            type: 'inside'
+                        }
+                    ],
+                    series: [
+                        {
+                            type: 'candlestick',
+                            data: d.historicals.map((data) => {
+                                return [
+                                    data.open_price,
+                                    data.close_price,
+                                    data.low_price,
+                                    data.high_price
+                                ]
+                            })
+                        },
+                        ...smas
+                    ],
+                    grid: {
+                        left: 35,
+                        top: 10,
+                        right: 10,
+                        bottom: 20 
+                    },
+                }
+                chart.setOption(options);
+                chart.hideLoading();
+
+            });
+
+            // set up repeated calls if within market hours
+            // setTimeout(() => {
+            //     getData(s);
+            // }, 1000 * 60 * 5);
+
+        })
+
+    
+        
+    })
+
+    
+    
+
+</script>
